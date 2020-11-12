@@ -1,0 +1,146 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Nov 29 09:02:24 2019
+
+@author: mxg635
+"""
+
+from collections import namedtuple
+import comtypes, comtypes.client
+from ctypes import *
+from comtypes.automation import *
+import sys
+import numpy
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+
+
+
+fp = ("path")
+
+
+polmasses = ("P:/Scripting/Polymer detection/polinfo.csv")
+
+#file_path = filedialog.askopenfilename(title = "Pick the .RAW file to parse")
+#raw_folder = filedialog.askdirectory(title = "Pick file directory for rawfiles to parse")
+#dir_path = filedialog.askdirectory(title = "Pick file directory for savefiles")
+
+
+def GetMSOrderForScanNum(xr, scanNumber):
+        """This function returns the MS order for the scan specified by scanNumber from the scan
+        event structure in the raw file.
+        The value returned in the pnScanType variable is one of the following:
+        Neutral gain -3
+        Neutral loss -2
+        Parent scan -1
+        Any scan order 0
+        MS  1
+        ETC
+        """
+        MSOrder = c_long()
+        error = xr.GetMSOrderForScanNum(c_long(scanNumber),byref(MSOrder))
+        if error : raise IOError( "scan {} : GetMSOrderForScanNum error : {}".format(scanNumber,error) )
+        return MSOrder.value
+
+
+def GetLabelData(xr, scanNumber): # This is a higher level function than GetMassListRangeFromScanNum, only for profile data (MS1).
+    """This method enables you to read the FT-PROFILE labels of a scan represented by the scanNumber.
+    The label data contains values of :
+    mass (double),
+    intensity (double),
+    resolution (float),
+    baseline (float),
+    noise (float)
+    and charge (int).
+    The flags are returned as unsigned char values. The flags are :
+    saturated,
+    fragmented,
+    merged,
+    exception,
+    reference,
+    and modified.
+
+    NOTE : This is a higher level function than GetMassListRangeFromScanNum, only for profile data (MS1).
+    """
+    pvarLabels = comtypes.automation.VARIANT()
+    pvarFlags = comtypes.automation.VARIANT()
+    error = xr.GetLabelData(pvarLabels,pvarFlags,c_long(scanNumber))
+    if error : raise IOError("GetLabelData error :", error)
+    Labels = namedtuple('Labels', 'mass intensity resolution baseline noise charge')
+    Flags = namedtuple('Flags', 'saturated fragmented merged exception reference modified')
+    return pvarLabels.value[0], pvarLabels.value[1], pvarLabels.value[5]  #Don't need flags (Mass, Int, Charge)
+    
+
+def polymers(mz,ints,z):
+    pol = 0
+    pep2 = 0
+    pep3 = 0
+    pep4 = 0
+    crap = 0
+    if (len(mz) == len(ints)) and (len(mz) == len(z)):
+        for i in range (len(mz)):
+            if ints[i]>=1000000:
+                if z[i] == 1.0:
+                    pol+=ints[i]
+                if z[i] == 2.0:
+                    pep2+=ints[i]
+                if z[i] == 3.0:
+                    pep3+=ints[i]
+                elif z[i] > 3.0:
+                    pep4+=ints[i]
+            else:
+                crap += ints[i] #Not currently in use
+        return([pol, pep2, pep3, pep4,crap])
+
+    else:
+        return(-1)#Bad legnth
+
+
+
+    
+xr = comtypes.client.CreateObject('MSFileReader.XRawfile')
+xr.open(fp)
+res = xr.SetCurrentController(0,1)#Needed for some reason.
+filename = fp.split('/')[-1][:-4]
+
+ns = c_long()
+xr.GetNumSpectra(ns)
+print(ns.value) 
+    
+ms1dict = dict()
+
+for i in range(1,ns.value):
+
+    if GetMSOrderForScanNum(xr,i) == 1:
+        
+        
+        ms1dict[i] = GetLabelData(xr,i)
+
+
+
+pdict = dict()
+for keys in ms1dict:
+    pdict[keys] =polymers(ms1dict[keys][0],ms1dict[keys][1],ms1dict[keys][2])
+
+poldf = pd.DataFrame.from_dict(pdict)
+
+poldfT = poldf.transpose()
+poldfT.columns = ['PolymerInt', 'Charge2','Charge3' ,'Charge4+', 'Crap Int']
+poldfT.head()
+
+poldfT['relative'] = poldfT['PolymerInt']/ ((poldfT['Charge2']+poldfT['Charge3']+poldfT['Charge4+']+poldfT['PolymerInt']))
+
+plotdf = poldfT.reset_index()
+
+print(filename)
+print(poldfT['relative'].mean())
+print(poldfT['PolymerInt'].mean()/1000000)
+print(poldfT['PolymerInt'].sum()/(poldfT['Charge2'].sum()+poldfT['Charge3'].sum()+poldfT['Charge4+'].sum()+poldfT['PolymerInt'].sum()))
+print(poldfT['PolymerInt'].sum())
+print(poldfT['Charge2'].sum())
+
+
+plotdf[plotdf['index'] < 2500][['index','PolymerInt', 'Charge2','Charge3' ,'Charge4+']].plot.line(x = 'index')
